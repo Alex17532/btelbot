@@ -6,6 +6,7 @@ import re
 from collections import defaultdict,Counter
 from datetime import datetime
 import statistics
+import os
 intents=discord.Intents.default()
 intents.message_content=True
 bot=commands.Bot(command_prefix='!',intents=intents,help_command=None)
@@ -321,4 +322,4 @@ async def global_stats(ctx):
 	if region_dist:top_regions=region_dist.most_common(3);region_text='\n'.join([f"**{region}**: {count}"for(region,count)in top_regions]);embed.add_field(name='🌍 Top Regions',value=region_text,inline=True)
 	if game_data.last_updated:embed.add_field(name='🔄 Data Status',value=f"Last updated:\n{game_data.last_updated.strftime("%Y-%m-%d %H:%M:%S")}",inline=True)
 	await ctx.send(embed=embed)
-if __name__=='__main__':bot.run("DISCORD_TOKEN")
+if __name__=='__main__':bot.run(os.getenv("DISCORD_TOKEN"))
