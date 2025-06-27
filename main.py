@@ -1,4 +1,5 @@
 import discord
+import os
 from discord.ext import commands
 import asyncio,csv,io,requests
 from typing import List,Dict,Optional
