@@ -1,9 +1,3 @@
 discord
-discord.ext
 asyncio
-csv
-io
 requests
-typing
-re
-collections
