@@ -1,12 +1,11 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands,tasks
 import asyncio,csv,io,requests
 from typing import List,Dict,Optional
 import re
 from collections import defaultdict,Counter
 from datetime import datetime
 import statistics
-import os
 intents=discord.Intents.default()
 intents.message_content=True
 bot=commands.Bot(command_prefix='!',intents=intents,help_command=None)
@@ -38,6 +37,20 @@ async def refresh_data(ctx):
 	'Refresh data from the spreadsheet';await ctx.send('🔄 Refreshing data from spreadsheet...');success=await game_data.load_data()
 	if success:await ctx.send(f"✅ Data refreshed! Loaded {len(game_data.matches)} matches and {len(game_data.players)} players.\nLast updated: {game_data.last_updated.strftime("%Y-%m-%d %H:%M:%S")}")
 	else:await ctx.send('❌ Failed to refresh data. Please try again later.')
+@tasks.loop(minutes=5)
+async def auto_refresh_data():
+    success = await game_data.load_data()
+    if success:
+        print(f"✅ Auto-refreshed at {datetime.now()}")
+    else:
+        print("❌ Auto-refresh failed")
+
+@bot.event
+async def on_ready():
+    print(f"{bot.user} has connected to Discord!")
+    await game_data.load_data()
+    auto_refresh_data.start()  # Start the auto-refresh loop
+    print('Data loaded successfully!')
 @bot.command(name='player')
 async def player_stats(ctx,*,player_name=None):
 	'Get comprehensive stats for a specific player'
@@ -322,4 +335,4 @@ async def global_stats(ctx):
 	if region_dist:top_regions=region_dist.most_common(3);region_text='\n'.join([f"**{region}**: {count}"for(region,count)in top_regions]);embed.add_field(name='🌍 Top Regions',value=region_text,inline=True)
 	if game_data.last_updated:embed.add_field(name='🔄 Data Status',value=f"Last updated:\n{game_data.last_updated.strftime("%Y-%m-%d %H:%M:%S")}",inline=True)
 	await ctx.send(embed=embed)
-if __name__=='__main__':bot.run(os.getenv("DISCORD_TOKEN"))
+if __name__=='__main__':bot.run("DISCORD_TOKEN")
