@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands,tasks
+from discord.ui import Button,View
 import asyncio,csv,io,requests
 from typing import List,Dict,Optional
 import re
@@ -7,333 +8,154 @@ from collections import defaultdict,Counter
 from datetime import datetime
 import statistics
 import os
+import math
 intents=discord.Intents.default()
 intents.message_content=True
 bot=commands.Bot(command_prefix='!',intents=intents,help_command=None)
 SHEET_URL='https://docs.google.com/spreadsheets/d/1r-5WoC6DcaCk9zJAz2Ct9b531AgoOIpvc98xm8oGg4w/export?format=csv&gid=741413211'
+HALL_OF_FAME_URL='https://docs.google.com/spreadsheets/d/1r-5WoC6DcaCk9zJAz2Ct9b531AgoOIpvc98xm8oGg4w/export?format=csv&gid=0'
 class BlockTanksData:
-	def __init__(self):self.matches=[];self.players=set();self.last_updated=None
+	def __init__(self):self.matches=[];self.players=set();self.last_updated=None;self.hall_of_fame=[]
 	async def load_data(self):
-		'Load data from Google Sheets with enhanced processing'
 		try:
-			response=requests.get(SHEET_URL);response.raise_for_status();csv_reader=csv.DictReader(io.StringIO(response.text));self.matches=[];self.players=set()
+			response=requests.get(SHEET_URL,timeout=30);response.raise_for_status();csv_reader=csv.DictReader(io.StringIO(response.text));self.matches=[];self.players=set()
 			for row in csv_reader:
 				if row.get('Winner/P1')and row.get('Winner/P1')!='Winner/P1':
 					match={'winner':row.get('Winner/P1','').strip(),'loser':row.get('Loser/P2','').strip(),'result':row.get('Result','').strip(),'map':row.get('Map','').strip(),'region':row.get('Region','').strip(),'winner_kills':self.safe_int(row.get('Winner Kills','0')),'loser_kills':self.safe_int(row.get('Loser Kills','0')),'winner_kdr':self.safe_float(row.get('Winner KDR','0')),'loser_kdr':self.safe_float(row.get('Loser KDR','0')),'outcome':row.get('Outcome','').strip(),'winner_points':self.safe_float(row.get('Winner Points','0')),'loser_points':self.safe_float(row.get('Loser Points','0')),'date':row.get('Date','').strip(),'time':row.get('Time','').strip(),'tournament':row.get('Tournament','').strip(),'week':row.get('Week','').strip(),'season':row.get('Season','').strip()};self.matches.append(match)
 					if match['winner']and match['winner']!='[RESIGNED]':self.players.add(match['winner'])
 					if match['loser']and match['loser']!='[RESIGNED]':self.players.add(match['loser'])
-			self.last_updated=datetime.now();print(f"Loaded {len(self.matches)} matches and {len(self.players)} players");return True
+			hof_response=requests.get(HALL_OF_FAME_URL,timeout=30);hof_response.raise_for_status();hof_data=[];lines=hof_response.text.strip().split('\n')
+			if len(lines)>1:
+				for(i,line)in enumerate(lines[1:],2):
+					parts=line.split(',')
+					if len(parts)>=10 and parts[1].strip():
+						player_name=parts[1].strip()
+						if player_name and player_name!='Player':hof_data.append({'position':i-1,'player':player_name,'matches':self.safe_int(parts[2]),'wins':self.safe_int(parts[3]),'draws':self.safe_int(parts[4]),'losses':self.safe_int(parts[5]),'kills':self.safe_int(parts[6]),'deaths':self.safe_int(parts[7]),'kdr':self.safe_float(parts[8]),'points':self.safe_float(parts[9]),'winrate':round(self.safe_int(parts[3])/max(self.safe_int(parts[2]),1)*100,2),'tier':self.get_tier(self.safe_float(parts[9]),self.safe_int(parts[3]))})
+			self.hall_of_fame=hof_data;self.last_updated=datetime.now();print(f"Loaded {len(self.matches)} matches, {len(self.players)} players, {len(self.hall_of_fame)} HOF entries");return True
 		except Exception as e:print(f"Error loading data: {e}");return False
 	def safe_int(self,value):
-		try:return int(float(value))if value else 0
+		try:return int(float(str(value).strip()))if value else 0
 		except:return 0
 	def safe_float(self,value):
-		try:return float(value)if value else .0
+		try:return float(str(value).strip())if value else .0
 		except:return .0
+	def get_tier(self,points,wins):
+		if points>=2000 and wins>=25:return'Diamond'
+		elif points>=1000 and wins>=15:return'Platinum'
+		elif points>=500 and wins>=10:return'Gold'
+		elif points>=100 and wins>=5:return'Silver'
+		elif points>=0:return'Bronze'
+		else:return'Unranked'
 game_data=BlockTanksData()
+class PaginatorView(View):
+	def __init__(self,ctx,pages,timeout=60):super().__init__(timeout=timeout);self.ctx=ctx;self.pages=pages;self.current_page=0;self.message=None
+	async def show_page(self,page_num):
+		self.current_page=page_num%len(self.pages);page=self.pages[self.current_page];self.first_page.disabled=self.current_page==0;self.prev_page.disabled=self.current_page==0;self.next_page.disabled=self.current_page==len(self.pages)-1;self.last_page.disabled=self.current_page==len(self.pages)-1;page_counter=f"Page {self.current_page+1}/{len(self.pages)}"
+		if isinstance(page,discord.Embed):
+			if not page.footer.text:page.set_footer(text=page_counter)
+			else:page.set_footer(text=f"{page.footer.text} • {page_counter}")
+			await self.message.edit(embed=page,view=self)
+		else:await self.message.edit(content=f"{page}\n\n{page_counter}",view=self)
+	@discord.ui.button(emoji='⏮️',style=discord.ButtonStyle.secondary)
+	async def first_page(self,interaction,button):await interaction.response.defer();await self.show_page(0)
+	@discord.ui.button(emoji='◀️',style=discord.ButtonStyle.primary)
+	async def prev_page(self,interaction,button):await interaction.response.defer();await self.show_page(self.current_page-1)
+	@discord.ui.button(emoji='▶️',style=discord.ButtonStyle.primary)
+	async def next_page(self,interaction,button):await interaction.response.defer();await self.show_page(self.current_page+1)
+	@discord.ui.button(emoji='⏭️',style=discord.ButtonStyle.secondary)
+	async def last_page(self,interaction,button):await interaction.response.defer();await self.show_page(len(self.pages)-1)
+	async def interaction_check(self,interaction):
+		if interaction.user!=self.ctx.author:await interaction.response.send_message("You can't control this pagination!",ephemeral=True);return False
+		return True
+	async def on_timeout(self):
+		for item in self.children:item.disabled=True
+		try:await self.message.edit(view=self)
+		except:pass
 @bot.event
-async def on_ready():print(f"{bot.user} has connected to Discord!");await game_data.load_data();print('Data loaded successfully!')
+async def on_ready():print(f"{bot.user} has connected to Discord!");await game_data.load_data();auto_refresh_data.start();print('Data loaded successfully!')
+@tasks.loop(minutes=5)
+async def auto_refresh_data():success=await game_data.load_data();print(f"{"✅"if success else"❌"} Auto-refresh at {datetime.now()}")
 @bot.command(name='refresh')
 async def refresh_data(ctx):
-	'Refresh data from the spreadsheet';await ctx.send('🔄 Refreshing data from spreadsheet...');success=await game_data.load_data()
-	if success:await ctx.send(f"✅ Data refreshed! Loaded {len(game_data.matches)} matches and {len(game_data.players)} players.\nLast updated: {game_data.last_updated.strftime("%Y-%m-%d %H:%M:%S")}")
-	else:await ctx.send('❌ Failed to refresh data. Please try again later.')
-@tasks.loop(minutes=5)
-async def auto_refresh_data():
-    success = await game_data.load_data()
-    if success:
-        print(f"✅ Auto-refreshed at {datetime.now()}")
-    else:
-        print("❌ Auto-refresh failed")
-
-@bot.event
-async def on_ready():
-    print(f"{bot.user} has connected to Discord!")
-    await game_data.load_data()
-    auto_refresh_data.start()  # Start the auto-refresh loop
-    print('Data loaded successfully!')
-@bot.command(name='player')
+	await ctx.send('🔄 Refreshing data...');success=await game_data.load_data()
+	if success:await ctx.send(f"✅ Loaded {len(game_data.matches)} matches, {len(game_data.players)} players, {len(game_data.hall_of_fame)} HOF entries")
+	else:await ctx.send('❌ Failed to refresh data')
+@bot.command(name='hof',aliases=['halloffame','rankings'])
+async def hall_of_fame(ctx,*,tier_filter=None):
+	if not game_data.hall_of_fame:await ctx.send('Hall of Fame data not loaded');return
+	filtered_hof=game_data.hall_of_fame
+	if tier_filter:
+		filtered_hof=[entry for entry in game_data.hall_of_fame if tier_filter.lower()in entry['tier'].lower()]
+		if not filtered_hof:await ctx.send(f"No entries for tier '{tier_filter}'");return
+	entries_per_page=15;pages=[];tier_emojis={'Diamond':'💎','Platinum':'🔶','Gold':'⭐','Silver':'🔹','Bronze':'🔸','Unranked':'❌'}
+	for i in range(0,len(filtered_hof),entries_per_page):
+		page_entries=filtered_hof[i:i+entries_per_page];embed=discord.Embed(title=f"🏆 BTEL Hall of Fame"+(f" - {tier_filter}"if tier_filter else''),color=16766720)
+		for entry in page_entries:tier_emoji=tier_emojis.get(entry['tier'],'🏅');value=f"**#{entry["position"]} | {entry["tier"]}** {tier_emoji}\n**W-D-L:** {entry["wins"]}-{entry["draws"]}-{entry["losses"]} ({entry["winrate"]:.1f}%)\n**K/D:** {entry["kdr"]:.2f} ({entry["kills"]}/{entry["deaths"]})\n**Points:** {entry["points"]:.0f} | **Games:** {entry["matches"]}";embed.add_field(name=f"{entry["player"]}",value=value,inline=True)
+		embed.set_footer(text=f"Total Players: {len(filtered_hof)}");pages.append(embed)
+	if not pages:await ctx.send('No Hall of Fame entries found');return
+	view=PaginatorView(ctx,pages);view.message=await ctx.send(embed=pages[0],view=view)
+@bot.command(name='player',aliases=['p','stats'])
 async def player_stats(ctx,*,player_name=None):
-	'Get comprehensive stats for a specific player'
-	if not player_name:await ctx.send('Please provide a player name: `!player PlayerName`');return
-	found_player=None
-	for p in game_data.players:
-		if p.lower()==player_name.lower():found_player=p;break
-	if not found_player:similar=[p for p in game_data.players if player_name.lower()in p.lower()];suggestion_text=f"\nDid you mean: {", ".join(similar[:5])}"if similar else'';await ctx.send(f"Player '{player_name}' not found.{suggestion_text}");return
-	wins=losses=draws=0;total_kills=total_deaths=0;total_points=.0;maps_played=Counter();regions_played=Counter();opponents_beaten=Counter();opponents_lost_to=Counter();recent_form=[];kdrs=[];points_per_game=[];kills_per_game=[];tournament_wins=Counter();season_stats=defaultdict(lambda:{'wins':0,'losses':0,'draws':0,'points':0});player_matches=[]
-	for match in game_data.matches:
-		if match['winner']==found_player or match['loser']==found_player:player_matches.append(match)
-	for match in player_matches:
-		if match['winner']==found_player:
-			if match['outcome']=='Draw':draws+=1;recent_form.append('D')
-			else:wins+=1;recent_form.append('W');opponents_beaten[match['loser']]+=1
-			total_points+=match['winner_points'];total_kills+=match['winner_kills'];total_deaths+=match['loser_kills'];kdrs.append(match['winner_kdr']);points_per_game.append(match['winner_points']);kills_per_game.append(match['winner_kills'])
-			if match['tournament']:tournament_wins[match['tournament']]+=1
-		elif match['loser']==found_player:
-			if match['outcome']=='Draw':draws+=1;recent_form.append('D')
-			else:losses+=1;recent_form.append('L');opponents_lost_to[match['winner']]+=1
-			total_points+=match['loser_points'];total_kills+=match['loser_kills'];total_deaths+=match['winner_kills'];kdrs.append(match['loser_kdr']);points_per_game.append(match['loser_points']);kills_per_game.append(match['loser_kills'])
-		maps_played[match['map']]+=1;regions_played[match['region']]+=1
-		if match['season']:
-			season=match['season']
-			if match['winner']==found_player:
-				if match['outcome']=='Draw':season_stats[season]['draws']+=1
-				else:season_stats[season]['wins']+=1
-				season_stats[season]['points']+=match['winner_points']
-			else:
-				if match['outcome']=='Draw':season_stats[season]['draws']+=1
-				else:season_stats[season]['losses']+=1
-				season_stats[season]['points']+=match['loser_points']
-	total_games=wins+losses+draws;kdr=total_kills/max(total_deaths,1);win_rate=wins/max(total_games,1)*100;avg_points=statistics.mean(points_per_game)if points_per_game else 0;avg_kills=statistics.mean(kills_per_game)if kills_per_game else 0;avg_kdr=statistics.mean(kdrs)if kdrs else 0;embed=discord.Embed(title=f"📊 Detailed Stats for {found_player}",color=65280);embed.add_field(name='🏆 Overall Record',value=f"**{wins}W - {losses}L - {draws}D**\nWin Rate: **{win_rate:.1f}%**\nTotal Games: **{total_games}**",inline=True);embed.add_field(name='⚔️ Combat Performance',value=f"**{total_kills}** total kills\n**{total_deaths}** total deaths\n**{kdr:.2f}** overall K/D\n**{avg_kdr:.2f}** avg K/D per game\n**{avg_kills:.1f}** avg kills/game",inline=True);embed.add_field(name='📈 Points & Performance',value=f"**{total_points:.1f}** total points\n**{avg_points:.1f}** avg points/game\n**{max(points_per_game)if points_per_game else 0:.1f}** best game points",inline=True)
-	if recent_form:form_display=''.join(recent_form[-10:]);embed.add_field(name='📊 Recent Form (Last 10)',value=f"**{form_display}**",inline=True)
-	if maps_played:fav_map=maps_played.most_common(1)[0];embed.add_field(name='🗺️ Favorite Map',value=f"**{fav_map[0]}**\n({fav_map[1]} games)",inline=True)
-	if regions_played:main_region=regions_played.most_common(1)[0];embed.add_field(name='🌍 Main Region',value=f"**{main_region[0]}**\n({main_region[1]} games)",inline=True)
-	if opponents_beaten:top_victim=opponents_beaten.most_common(1)[0];embed.add_field(name='🎯 Most Defeated',value=f"**{top_victim[0]}**\n({top_victim[1]} times)",inline=True)
-	if opponents_lost_to:main_rival=opponents_lost_to.most_common(1)[0];embed.add_field(name='😅 Biggest Rival',value=f"**{main_rival[0]}**\n(lost {main_rival[1]} times)",inline=True)
-	if tournament_wins:best_tournament=tournament_wins.most_common(1)[0];embed.add_field(name='🏆 Tournament Success',value=f"**{best_tournament[0]}**\n({best_tournament[1]} wins)",inline=True)
-	if season_stats:
-		season_text=''
-		for(season,stats)in sorted(season_stats.items()):season_text+=f"**{season}**: {stats["wins"]}W-{stats["losses"]}L-{stats["draws"]}D ({stats["points"]:.1f}pts)\n"
-		embed.add_field(name='📅 Season Breakdown',value=season_text[:1024],inline=False)
-	await ctx.send(embed=embed)
+	if not player_name:await ctx.send('Please specify a player name');return
+	player_matches=[m for m in game_data.matches if player_name.lower()in m['winner'].lower()or player_name.lower()in m['loser'].lower()];exact_match=next((p for p in game_data.players if p.lower()==player_name.lower()),None)
+	if not exact_match and player_matches:possible=list(set([m['winner']for m in player_matches]+[m['loser']for m in player_matches]));await ctx.send(f"Player not found. Did you mean: {", ".join(possible[:5])}");return
+	player=exact_match;hof_entry=next((h for h in game_data.hall_of_fame if h['player'].lower()==player.lower()),None)
+	if hof_entry:
+		tier_emojis={'Diamond':'💎','Platinum':'🔶','Gold':'⭐','Silver':'🔹','Bronze':'🔸','Unranked':'❌'};embed=discord.Embed(title=f"📊 {player} - Player Stats",color=65280);embed.add_field(name='🏆 Ranking',value=f"**#{hof_entry["position"]}** | {hof_entry["tier"]} {tier_emojis.get(hof_entry["tier"],"🏅")}",inline=True);embed.add_field(name='📈 Record',value=f"{hof_entry["wins"]}W-{hof_entry["draws"]}D-{hof_entry["losses"]}L\n({hof_entry["winrate"]:.1f}% WR)",inline=True);embed.add_field(name='⚔️ Combat',value=f"K/D: {hof_entry["kdr"]:.2f}\n{hof_entry["kills"]}K/{hof_entry["deaths"]}D",inline=True);embed.add_field(name='🎮 Performance',value=f"Points: {hof_entry["points"]:.0f}\nGames: {hof_entry["matches"]}",inline=True);embed.add_field(name='📊 Averages',value=f"PPG: {hof_entry["points"]/max(hof_entry["matches"],1):.1f}\nKPG: {hof_entry["kills"]/max(hof_entry["matches"],1):.1f}",inline=True);recent_matches=[m for m in game_data.matches if m['winner']==player or m['loser']==player][-5:]
+		if recent_matches:
+			recent_text=''
+			for match in recent_matches:result='W'if match['winner']==player else'L';opponent=match['loser']if match['winner']==player else match['winner'];recent_text+=f"{result} vs {opponent} | "
+			embed.add_field(name='🔄 Recent (Last 5)',value=recent_text[:-3],inline=False)
+		await ctx.send(embed=embed)
+	else:await ctx.send(f"No Hall of Fame data found for {player}")
 @bot.command(name='leaderboard',aliases=['lb','top'])
 async def leaderboard(ctx,stat='points',season=None):
-	'Show detailed leaderboard by various stats';valid_stats=['wins','points','kdr','kills','games','winrate','ppg','kpg']
-	if stat.lower()not in valid_stats:await ctx.send(f"Invalid stat. Choose from: {", ".join(valid_stats)}");return
-	player_stats={}
-	for player in game_data.players:
-		wins=losses=draws=kills=deaths=0;points=.0;games_played=0
-		for match in game_data.matches:
-			if season and match.get('season','').lower()!=season.lower():continue
-			if match['winner']==player:
-				if match['outcome']=='Draw':draws+=1
-				else:wins+=1
-				points+=match['winner_points'];kills+=match['winner_kills'];deaths+=match['loser_kills'];games_played+=1
-			elif match['loser']==player:
-				if match['outcome']=='Draw':draws+=1
-				else:losses+=1
-				points+=match['loser_points'];kills+=match['loser_kills'];deaths+=match['winner_kills'];games_played+=1
-		total_games=wins+losses+draws
-		if total_games>0:kdr=kills/max(deaths,1);winrate=wins/total_games*100;ppg=points/total_games;kpg=kills/total_games;player_stats[player]={'wins':wins,'points':points,'kdr':kdr,'kills':kills,'games':total_games,'winrate':winrate,'ppg':ppg,'kpg':kpg}
-	stat_lower=stat.lower();sorted_players=sorted(player_stats.items(),key=lambda x:x[1][stat_lower],reverse=True);stat_names={'wins':'🏆 Wins Leaderboard','points':'📈 Points Leaderboard','kdr':'⚔️ K/D Ratio Leaderboard','kills':'💀 Kills Leaderboard','games':'🎮 Games Played Leaderboard','winrate':'📊 Win Rate Leaderboard','ppg':'📈 Points Per Game Leaderboard','kpg':'⚔️ Kills Per Game Leaderboard'};title=stat_names[stat_lower]
-	if season:title+=f" (Season: {season})"
-	embed=discord.Embed(title=title,color=16766720);leaderboard_text=''
-	for(i,(player,stats))in enumerate(sorted_players[:20],1):
-		medal='🥇'if i==1 else'🥈'if i==2 else'🥉'if i==3 else f"{i}."
-		if stat_lower in['points','ppg','kpg']:value=f"{stats[stat_lower]:.1f}"
-		elif stat_lower in['kdr','winrate']:
-			value=f"{stats[stat_lower]:.2f}"
-			if stat_lower=='winrate':value+='%'
-		else:value=str(int(stats[stat_lower]))
-		games=stats['games'];leaderboard_text+=f"{medal} **{player}** - {value} ({games} games)\n"
-	embed.description=leaderboard_text;await ctx.send(embed=embed)
-@bot.command(name='match')
-async def recent_matches(ctx,*,player_name=None):
-	'Show detailed recent matches';matches_to_show=game_data.matches[-15:]
-	if player_name:
-		found_player=None
-		for p in game_data.players:
-			if p.lower()==player_name.lower():found_player=p;break
-		if not found_player:await ctx.send(f"Player '{player_name}' not found.");return
-		player_matches=[]
-		for match in game_data.matches:
-			if match['winner']==found_player or match['loser']==found_player:player_matches.append(match)
-		matches_to_show=player_matches[-15:];embed_title=f"📝 Recent matches for {found_player}"
-	else:embed_title='📝 Recent matches (All Players)'
-	embed=discord.Embed(title=embed_title,color=39423);match_text=''
-	for match in reversed(matches_to_show):
-		result=match['result'];map_name=match['map'];region=match['region'];winner_kills=match['winner_kills'];loser_kills=match['loser_kills'];winner_points=match['winner_points'];loser_points=match['loser_points'];date=match.get('date','');tournament=match.get('tournament','');kill_info=f"({winner_kills}-{loser_kills})";points_info=f"[{winner_points:.1f}-{loser_points:.1f}pts]"
-		if match['outcome']=='Draw':match_line=f"🤝 **{match["winner"]}** vs **{match["loser"]}** {kill_info}\n"
-		else:match_line=f"🏆 **{match["winner"]}** beat **{match["loser"]}** {kill_info}\n"
-		match_line+=f"   📍 {map_name} ({region}) {points_info}"
-		if tournament:match_line+=f" 🏆{tournament}"
-		if date:match_line+=f" 📅{date}"
-		match_line+='\n\n';match_text+=match_line
-	if not match_text:match_text='No matches found.'
-	embed.description=match_text[:4000];await ctx.send(embed=embed)
-@bot.command(name='map')
-async def map_stats(ctx,*,map_name=None):
-	'Show comprehensive map statistics'
-	if not map_name:
-		maps=Counter()
-		for match in game_data.matches:
-			if match['map']:maps[match['map']]+=1
-		embed=discord.Embed(title='🗺️ Map Statistics Overview',color=65433);map_list=''
-		for(map_name,count)in maps.most_common():map_matches=[m for m in game_data.matches if m['map']==map_name];total_kills=sum(m['winner_kills']+m['loser_kills']for m in map_matches);avg_kills=total_kills/count if count>0 else 0;avg_points=sum(m['winner_points']+m['loser_points']for m in map_matches)/count if count>0 else 0;map_list+=f"**{map_name}** - {count} matches\n";map_list+=f"   ⚔️ {avg_kills:.1f} avg kills/game | 📈 {avg_points:.1f} avg points/game\n\n"
-		embed.description=map_list;await ctx.send(embed=embed);return
-	map_matches=[m for m in game_data.matches if m['map'].lower()==map_name.lower()]
-	if not map_matches:await ctx.send(f"No matches found on map '{map_name}'");return
-	actual_map_name=map_matches[0]['map'];total_matches=len(map_matches);total_kills=sum(m['winner_kills']+m['loser_kills']for m in map_matches);total_points=sum(m['winner_points']+m['loser_points']for m in map_matches);avg_kills=total_kills/total_matches;avg_points=total_points/total_matches;regions=Counter(m['region']for m in map_matches);players=Counter();player_wins=Counter();tournaments=Counter();outcomes=Counter()
-	for match in map_matches:
-		if match['winner']!='[RESIGNED]':players[match['winner']]+=1;player_wins[match['winner']]+=1 if match['outcome']!='Draw'else 0
-		if match['loser']!='[RESIGNED]':players[match['loser']]+=1
-		if match['tournament']:tournaments[match['tournament']]+=1
-		outcomes[match['outcome']]+=1
-	player_winrates={}
-	for(player,games)in players.most_common(10):wins=player_wins.get(player,0);winrate=wins/games*100 if games>0 else 0;player_winrates[player]=wins,games,winrate
-	embed=discord.Embed(title=f"🗺️ {actual_map_name} - Detailed Analysis",color=65433);embed.add_field(name='📊 Match Overview',value=f"**{total_matches}** total matches\n**{avg_kills:.1f}** avg kills per game\n**{avg_points:.1f}** avg points per game",inline=True)
-	if regions:top_regions=regions.most_common(3);region_text='\n'.join([f"**{region}**: {count} games"for(region,count)in top_regions]);embed.add_field(name='🌍 Regional Play',value=region_text,inline=True)
-	if outcomes:outcome_text='\n'.join([f"**{outcome or"Regular"}**: {count}"for(outcome,count)in outcomes.most_common()]);embed.add_field(name='🎯 Match Outcomes',value=outcome_text,inline=True)
-	if player_winrates:
-		performer_text=''
-		for(player,(wins,games,winrate))in list(player_winrates.items())[:5]:
-			if games>=3:performer_text+=f"**{player}**: {wins}W/{games}G ({winrate:.1f}%)\n"
-		if performer_text:embed.add_field(name='👑 Top Performers (3+ games)',value=performer_text,inline=False)
-	if tournaments:tournament_text='\n'.join([f"**{t}**: {c} matches"for(t,c)in tournaments.most_common(3)]);embed.add_field(name='🏆 Tournament Activity',value=tournament_text,inline=True)
+	valid_stats=['wins','points','kdr','kills','games','winrate','ppg','kpg','position']
+	if stat.lower()not in valid_stats:await ctx.send(f"Invalid stat. Choose: {", ".join(valid_stats)}");return
+	if stat.lower()=='position':sorted_hof=sorted(game_data.hall_of_fame,key=lambda x:x['position'])
+	else:sorted_hof=sorted(game_data.hall_of_fame,key=lambda x:x.get(stat.lower(),0),reverse=True)
+	stat_names={'wins':'🏆 Wins','points':'📈 Points','kdr':'⚔️ K/D Ratio','kills':'💀 Kills','games':'🎮 Games','winrate':'📊 Win Rate','ppg':'📈 PPG','kpg':'⚔️ KPG','position':'🏆 Rankings'};entries_per_page=15;pages=[]
+	for i in range(0,len(sorted_hof),entries_per_page):
+		page_entries=sorted_hof[i:i+entries_per_page];embed=discord.Embed(title=f"{stat_names.get(stat.lower(),stat)} Leaderboard",color=16753920);leaderboard_text=''
+		for(j,entry)in enumerate(page_entries,start=i+1):
+			medal='🥇'if j==1 else'🥈'if j==2 else'🥉'if j==3 else f"{j}."
+			if stat.lower()in['points','ppg','kpg']:value=f"{entry.get(stat.lower(),0):.1f}"
+			elif stat.lower()in['kdr','winrate']:
+				value=f"{entry.get(stat.lower(),0):.2f}"
+				if stat.lower()=='winrate':value+='%'
+			elif stat.lower()=='position':value=f"#{entry["position"]}"
+			else:value=str(entry.get(stat.lower(),0))
+			leaderboard_text+=f"{medal} **{entry["player"]}** - {value} ({entry["matches"]} games)\n"
+		embed.description=leaderboard_text;embed.set_footer(text=f"Total players: {len(sorted_hof)}");pages.append(embed)
+	if not pages:await ctx.send('No leaderboard data available');return
+	view=PaginatorView(ctx,pages);view.message=await ctx.send(embed=pages[0],view=view)
+@bot.command(name='vs',aliases=['versus','h2h'])
+async def head_to_head(ctx,player1,player2):
+	matches=[m for m in game_data.matches if m['winner'].lower()==player1.lower()and m['loser'].lower()==player2.lower()or m['winner'].lower()==player2.lower()and m['loser'].lower()==player1.lower()]
+	if not matches:await ctx.send(f"No matches found between {player1} and {player2}");return
+	p1_wins=len([m for m in matches if m['winner'].lower()==player1.lower()]);p2_wins=len([m for m in matches if m['winner'].lower()==player2.lower()]);embed=discord.Embed(title=f"⚔️ {player1} vs {player2}",color=16739179);embed.add_field(name='📊 Head-to-Head',value=f"{player1}: {p1_wins} wins\n{player2}: {p2_wins} wins",inline=False)
+	if len(matches)<=10:
+		recent_text=''
+		for match in matches[-10:]:winner='**'+match['winner']+'**'if match['winner'].lower()==player1.lower()else match['winner'];loser='**'+match['loser']+'**'if match['loser'].lower()==player1.lower()else match['loser'];recent_text+=f"{winner} def. {loser} ({match["winner_kills"]}-{match["loser_kills"]})\n"
+		embed.add_field(name='🎮 Match History',value=recent_text,inline=False)
 	await ctx.send(embed=embed)
-@bot.command(name='vs')
-async def head_to_head(ctx,player1,*,player2):
-	'Detailed head-to-head comparison';found_p1=found_p2=None
-	for p in game_data.players:
-		if p.lower()==player1.lower():found_p1=p
-		if p.lower()==player2.lower():found_p2=p
-	if not found_p1:await ctx.send(f"Player '{player1}' not found.");return
-	if not found_p2:await ctx.send(f"Player '{player2}' not found.");return
-	h2h_matches=[]
-	for match in game_data.matches:
-		if match['winner']==found_p1 and match['loser']==found_p2 or match['winner']==found_p2 and match['loser']==found_p1:h2h_matches.append(match)
-	if not h2h_matches:await ctx.send(f"No matches found between {found_p1} and {found_p2}");return
-	p1_wins=p1_kills=p1_deaths=p1_points=0;p2_wins=p2_kills=p2_deaths=p2_points=0;draws=0;maps_played=Counter();recent_matches=[]
-	for match in h2h_matches:
-		maps_played[match['map']]+=1
-		if match['outcome']=='Draw':draws+=1
-		elif match['winner']==found_p1:p1_wins+=1
-		else:p2_wins+=1
-		if match['winner']==found_p1:p1_kills+=match['winner_kills'];p1_deaths+=match['loser_kills'];p1_points+=match['winner_points'];p2_kills+=match['loser_kills'];p2_deaths+=match['winner_kills'];p2_points+=match['loser_points'];recent_matches.append(f"W vs {found_p2}")
-		else:p2_kills+=match['winner_kills'];p2_deaths+=match['loser_kills'];p2_points+=match['winner_points'];p1_kills+=match['loser_kills'];p1_deaths+=match['winner_kills'];p1_points+=match['loser_points'];recent_matches.append(f"L vs {found_p2}")
-	embed=discord.Embed(title=f"⚔️ {found_p1} vs {found_p2} - Head to Head",color=16739229);total_games=len(h2h_matches);p1_winrate=p1_wins/max(total_games-draws,1)*100;p2_winrate=p2_wins/max(total_games-draws,1)*100;embed.add_field(name='🏆 Head-to-Head Record',value=f"**{found_p1}**: {p1_wins}W ({p1_winrate:.1f}%)\n**{found_p2}**: {p2_wins}W ({p2_winrate:.1f}%)\n**Draws**: {draws}\n**Total Games**: {total_games}",inline=True);p1_kdr=p1_kills/max(p1_deaths,1);p2_kdr=p2_kills/max(p2_deaths,1);embed.add_field(name='💀 Combat Stats',value=f"**{found_p1}**: {p1_kills}K/{p1_deaths}D ({p1_kdr:.2f})\n**{found_p2}**: {p2_kills}K/{p2_deaths}D ({p2_kdr:.2f})",inline=True);p1_ppg=p1_points/total_games;p2_ppg=p2_points/total_games;embed.add_field(name='📈 Points Performance',value=f"**{found_p1}**: {p1_points:.1f} total ({p1_ppg:.1f}/game)\n**{found_p2}**: {p2_points:.1f} total ({p2_ppg:.1f}/game)",inline=True)
-	if maps_played:map_text='\n'.join([f"**{map_name}**: {count} games"for(map_name,count)in maps_played.most_common(5)]);embed.add_field(name='🗺️ Maps Played',value=map_text,inline=True)
-	recent_form=recent_matches[-5:]
-	if recent_form:form_display=' → '.join([result.split()[0]for result in recent_form]);embed.add_field(name='📊 Recent Form (Last 5)',value=f"**{found_p1}**: {form_display}",inline=True)
+@bot.command(name='compare',aliases=['comp'])
+async def compare_players(ctx,player1,player2):
+	hof1=next((h for h in game_data.hall_of_fame if h['player'].lower()==player1.lower()),None);hof2=next((h for h in game_data.hall_of_fame if h['player'].lower()==player2.lower()),None)
+	if not hof1 or not hof2:await ctx.send('One or both players not found in Hall of Fame');return
+	embed=discord.Embed(title=f"📊 {player1} vs {player2} Comparison",color=10181046);stats=[('Position','position',lambda x:f"#{x}"),('Wins','wins',str),('Win Rate','winrate',lambda x:f"{x:.1f}%"),('K/D Ratio','kdr',lambda x:f"{x:.2f}"),('Points','points',lambda x:f"{x:.0f}"),('Games','matches',str)]
+	for(stat_name,stat_key,formatter)in stats:
+		val1,val2=hof1[stat_key],hof2[stat_key]
+		if stat_key=='position':better=player1 if val1<val2 else player2 if val2<val1 else'Tie'
+		else:better=player1 if val1>val2 else player2 if val2>val1 else'Tie'
+		embed.add_field(name=f"{stat_name}",value=f"{player1}: {formatter(val1)}\n{player2}: {formatter(val2)}\n**Edge: {better}**",inline=True)
 	await ctx.send(embed=embed)
-@bot.command(name='tournament',aliases=['tourney'])
-async def tournament_stats(ctx,*,tournament_name=None):
-	'Show tournament statistics and leaderboards'
-	if not tournament_name:
-		tournaments=Counter()
-		for match in game_data.matches:
-			if match.get('tournament'):tournaments[match['tournament']]+=1
-		embed=discord.Embed(title='🏆 Tournament Overview',color=16766720)
-		if tournaments:
-			tourney_text=''
-			for(tourney,matches)in tournaments.most_common():tourney_text+=f"**{tourney}**: {matches} matches\n"
-			embed.add_field(name='Available Tournaments',value=tourney_text,inline=False)
-		else:embed.description='No tournament data available.'
-		await ctx.send(embed=embed);return
-	tournament_matches=[m for m in game_data.matches if m.get('tournament','').lower()==tournament_name.lower()]
-	if not tournament_matches:await ctx.send(f"No matches found for tournament '{tournament_name}'");return
-	actual_tournament_name=tournament_matches[0]['tournament'];participants=set();player_stats=defaultdict(lambda:{'wins':0,'losses':0,'draws':0,'kills':0,'deaths':0,'points':0})
-	for match in tournament_matches:
-		if match['winner']!='[RESIGNED]':
-			participants.add(match['winner'])
-			if match['outcome']=='Draw':player_stats[match['winner']]['draws']+=1
-			else:player_stats[match['winner']]['wins']+=1
-			player_stats[match['winner']]['kills']+=match['winner_kills'];player_stats[match['winner']]['deaths']+=match['loser_kills'];player_stats[match['winner']]['points']+=match['winner_points']
-		if match['loser']!='[RESIGNED]':
-			participants.add(match['loser'])
-			if match['outcome']=='Draw':player_stats[match['loser']]['draws']+=1
-			else:player_stats[match['loser']]['losses']+=1
-			player_stats[match['loser']]['kills']+=match['loser_kills'];player_stats[match['loser']]['deaths']+=match['winner_kills'];player_stats[match['loser']]['points']+=match['loser_points']
-	sorted_players=sorted(player_stats.items(),key=lambda x:(x[1]['wins'],x[1]['points']),reverse=True);embed=discord.Embed(title=f"🏆 {actual_tournament_name} Statistics",color=16766720);embed.add_field(name='📊 Tournament Overview',value=f"**{len(tournament_matches)}** total matches\n**{len(participants)}** participants\n**{sum(m["winner_kills"]+m["loser_kills"]for m in tournament_matches)}** total kills",inline=True);leaderboard_text=''
-	for(i,(player,stats))in enumerate(sorted_players[:10],1):medal='🥇'if i==1 else'🥈'if i==2 else'🥉'if i==3 else f"{i}.";total_games=stats['wins']+stats['losses']+stats['draws'];kdr=stats['kills']/max(stats['deaths'],1);leaderboard_text+=f"{medal} **{player}** - {stats["wins"]}W/{stats["losses"]}L/{stats["draws"]}D ";leaderboard_text+=f"({stats["points"]:.1f}pts, {kdr:.2f} K/D)\n"
-	embed.add_field(name='🏆 Tournament Leaderboard',value=leaderboard_text,inline=False);await ctx.send(embed=embed)
-@bot.command(name='season')
-async def season_stats(ctx,*,season_name=None):
-	'Show season statistics and analysis'
-	if not season_name:
-		seasons=Counter()
-		for match in game_data.matches:
-			if match.get('season'):seasons[match['season']]+=1
-		embed=discord.Embed(title='📅 Season Overview',color=10040012)
-		if seasons:
-			season_text=''
-			for(season,matches)in seasons.most_common():season_text+=f"**{season}**: {matches} matches\n"
-			embed.add_field(name='Available Seasons',value=season_text,inline=False)
-		else:embed.description='No season data available.'
-		await ctx.send(embed=embed);return
-	season_matches=[m for m in game_data.matches if m.get('season','').lower()==season_name.lower()]
-	if not season_matches:await ctx.send(f"No matches found for season '{season_name}'");return
-	actual_season_name=season_matches[0]['season'];participants=set();player_stats=defaultdict(lambda:{'wins':0,'losses':0,'draws':0,'kills':0,'deaths':0,'points':0,'games':0});maps_played=Counter();weekly_activity=Counter()
-	for match in season_matches:
-		maps_played[match['map']]+=1
-		if match.get('week'):weekly_activity[match['week']]+=1
-		for(player_key,opponent_key)in[('winner','loser'),('loser','winner')]:
-			player=match[player_key]
-			if player!='[RESIGNED]':
-				participants.add(player);player_stats[player]['games']+=1
-				if player_key=='winner':
-					if match['outcome']=='Draw':player_stats[player]['draws']+=1
-					else:player_stats[player]['wins']+=1
-					player_stats[player]['kills']+=match['winner_kills'];player_stats[player]['deaths']+=match['loser_kills'];player_stats[player]['points']+=match['winner_points']
-				else:
-					if match['outcome']=='Draw':player_stats[player]['draws']+=1
-					else:player_stats[player]['losses']+=1
-					player_stats[player]['kills']+=match['loser_kills'];player_stats[player]['deaths']+=match['winner_kills'];player_stats[player]['points']+=match['loser_points']
-	for(player,stats)in player_stats.items():stats['winrate']=stats['wins']/max(stats['games']-stats['draws'],1)*100;stats['kdr']=stats['kills']/max(stats['deaths'],1);stats['ppg']=stats['points']/max(stats['games'],1)
-	sorted_players=sorted(player_stats.items(),key=lambda x:x[1]['points'],reverse=True);embed=discord.Embed(title=f"📅 {actual_season_name} Season Analysis",color=10040012);total_kills=sum(m['winner_kills']+m['loser_kills']for m in season_matches);total_points=sum(m['winner_points']+m['loser_points']for m in season_matches);embed.add_field(name='📊 Season Overview',value=f"**{len(season_matches)}** matches played\n**{len(participants)}** active players\n**{total_kills}** total eliminations\n**{total_points:.1f}** total points awarded",inline=True)
-	if maps_played:top_maps=maps_played.most_common(3);map_text='\n'.join([f"**{map_name}**: {count}"for(map_name,count)in top_maps]);embed.add_field(name='🗺️ Most Played Maps',value=map_text,inline=True)
-	if weekly_activity:week_text='\n'.join([f"**Week {week}**: {matches}"for(week,matches)in sorted(weekly_activity.items())]);embed.add_field(name='📈 Weekly Activity',value=week_text[:1024],inline=True)
-	leaderboard_text=''
-	for(i,(player,stats))in enumerate(sorted_players[:15],1):medal='🥇'if i==1 else'🥈'if i==2 else'🥉'if i==3 else f"{i}.";leaderboard_text+=f"{medal} **{player}** - {stats["points"]:.1f}pts ";leaderboard_text+=f"({stats["wins"]}W-{stats["losses"]}L-{stats["draws"]}D, ";leaderboard_text+=f"{stats["winrate"]:.1f}% WR, {stats["kdr"]:.2f} K/D)\n"
-	embed.add_field(name='🏆 Season Leaderboard',value=leaderboard_text,inline=False);await ctx.send(embed=embed)
-@bot.command(name='compare')
-async def compare_players(ctx,player1,*,player2):
-	'Comprehensive comparison between two players';found_p1=found_p2=None
-	for p in game_data.players:
-		if p.lower()==player1.lower():found_p1=p
-		if p.lower()==player2.lower():found_p2=p
-	if not found_p1:await ctx.send(f"Player '{player1}' not found.");return
-	if not found_p2:await ctx.send(f"Player '{player2}' not found.");return
-	players_stats={}
-	for player in[found_p1,found_p2]:
-		stats={'wins':0,'losses':0,'draws':0,'kills':0,'deaths':0,'points':0,'games':0,'maps':Counter(),'opponents_beaten':Counter(),'recent_form':[]}
-		for match in game_data.matches:
-			if match['winner']==player:
-				if match['outcome']=='Draw':stats['draws']+=1;stats['recent_form'].append('D')
-				else:stats['wins']+=1;stats['recent_form'].append('W');stats['opponents_beaten'][match['loser']]+=1
-				stats['kills']+=match['winner_kills'];stats['deaths']+=match['loser_kills'];stats['points']+=match['winner_points'];stats['games']+=1;stats['maps'][match['map']]+=1
-			elif match['loser']==player:
-				if match['outcome']=='Draw':stats['draws']+=1;stats['recent_form'].append('D')
-				else:stats['losses']+=1;stats['recent_form'].append('L')
-				stats['kills']+=match['loser_kills'];stats['deaths']+=match['winner_kills'];stats['points']+=match['loser_points'];stats['games']+=1;stats['maps'][match['map']]+=1
-		stats['winrate']=stats['wins']/max(stats['games']-stats['draws'],1)*100;stats['kdr']=stats['kills']/max(stats['deaths'],1);stats['ppg']=stats['points']/max(stats['games'],1);stats['kpg']=stats['kills']/max(stats['games'],1);players_stats[player]=stats
-	p1_stats=players_stats[found_p1];p2_stats=players_stats[found_p2];embed=discord.Embed(title=f"📊 Player Comparison: {found_p1} vs {found_p2}",color=52945);embed.add_field(name='🏆 Overall Record',value=f"**{found_p1}**: {p1_stats["wins"]}W-{p1_stats["losses"]}L-{p1_stats["draws"]}D ({p1_stats["winrate"]:.1f}%)\n**{found_p2}**: {p2_stats["wins"]}W-{p2_stats["losses"]}L-{p2_stats["draws"]}D ({p2_stats["winrate"]:.1f}%)",inline=False);embed.add_field(name='⚔️ Combat Stats',value=f"**{found_p1}**: {p1_stats["kills"]}K/{p1_stats["deaths"]}D ({p1_stats["kdr"]:.2f} K/D)\n**{found_p2}**: {p2_stats["kills"]}K/{p2_stats["deaths"]}D ({p2_stats["kdr"]:.2f} K/D)",inline=True);embed.add_field(name='📈 Performance',value=f"**{found_p1}**: {p1_stats["ppg"]:.1f} PPG, {p1_stats["kpg"]:.1f} KPG\n**{found_p2}**: {p2_stats["ppg"]:.1f} PPG, {p2_stats["kpg"]:.1f} KPG",inline=True);embed.add_field(name='🎮 Activity',value=f"**{found_p1}**: {p1_stats["games"]} total games\n**{found_p2}**: {p2_stats["games"]} total games",inline=True);p1_form=''.join(p1_stats['recent_form'][-10:]);p2_form=''.join(p2_stats['recent_form'][-10:]);embed.add_field(name='📊 Recent Form (Last 10)',value=f"**{found_p1}**: {p1_form}\n**{found_p2}**: {p2_form}",inline=False);p1_fav_map=p1_stats['maps'].most_common(1)[0]if p1_stats['maps']else('None',0);p2_fav_map=p2_stats['maps'].most_common(1)[0]if p2_stats['maps']else('None',0);embed.add_field(name='🗺️ Favorite Maps',value=f"**{found_p1}**: {p1_fav_map[0]} ({p1_fav_map[1]} games)\n**{found_p2}**: {p2_fav_map[0]} ({p2_fav_map[1]} games)",inline=True);p1_victim=p1_stats['opponents_beaten'].most_common(1)[0]if p1_stats['opponents_beaten']else('None',0);p2_victim=p2_stats['opponents_beaten'].most_common(1)[0]if p2_stats['opponents_beaten']else('None',0);embed.add_field(name='🎯 Most Defeated',value=f"**{found_p1}**: {p1_victim[0]} ({p1_victim[1]}x)\n**{found_p2}**: {p2_victim[0]} ({p2_victim[1]}x)",inline=True);await ctx.send(embed=embed)
-@bot.command(name='rankings')
-async def power_rankings(ctx,season=None):
-	'Show comprehensive power rankings with multiple metrics';player_stats={}
-	for player in game_data.players:
-		stats={'wins':0,'losses':0,'draws':0,'kills':0,'deaths':0,'points':0,'games':0}
-		for match in game_data.matches:
-			if season and match.get('season','').lower()!=season.lower():continue
-			if match['winner']==player:
-				if match['outcome']=='Draw':stats['draws']+=1
-				else:stats['wins']+=1
-				stats['points']+=match['winner_points'];stats['kills']+=match['winner_kills'];stats['deaths']+=match['loser_kills'];stats['games']+=1
-			elif match['loser']==player:
-				if match['outcome']=='Draw':stats['draws']+=1
-				else:stats['losses']+=1
-				stats['points']+=match['loser_points'];stats['kills']+=match['loser_kills'];stats['deaths']+=match['winner_kills'];stats['games']+=1
-		if stats['games']>=5:stats['winrate']=stats['wins']/max(stats['games']-stats['draws'],1)*100;stats['kdr']=stats['kills']/max(stats['deaths'],1);stats['ppg']=stats['points']/stats['games'];power_rating=stats['winrate']*.3+stats['kdr']*20*.25+stats['ppg']*.25+min(stats['games']/20,1)*20*.2;stats['power_rating']=power_rating;player_stats[player]=stats
-	sorted_players=sorted(player_stats.items(),key=lambda x:x[1]['power_rating'],reverse=True);title='🏆 Power Rankings'
-	if season:title+=f" (Season: {season})"
-	embed=discord.Embed(title=title,color=16716947);embed.add_field(name='📊 Ranking Formula',value='Win Rate (30%) + K/D (25%) + PPG (25%) + Activity (20%)',inline=False);rankings_text=''
-	for(i,(player,stats))in enumerate(sorted_players[:15],1):medal='🥇'if i==1 else'🥈'if i==2 else'🥉'if i==3 else f"{i}.";rankings_text+=f"{medal} **{player}** - {stats["power_rating"]:.1f}\n";rankings_text+=f"   {stats["winrate"]:.1f}% WR | {stats["kdr"]:.2f} K/D | ";rankings_text+=f"{stats["ppg"]:.1f} PPG | {stats["games"]} games\n\n"
-	embed.add_field(name='🏆 Current Rankings',value=rankings_text,inline=False);await ctx.send(embed=embed)
 @bot.command(name='help')
-async def help_command(ctx):'Show all available commands with detailed descriptions';embed=discord.Embed(title='🤖 BlockTanks League Bot - Complete Command Guide',color=7506394);commands_text='\n**Player Commands:**\n`!player <name>` - Comprehensive player statistics and analysis\n`!compare <player1> <player2>` - Detailed comparison between two players\n`!vs <player1> <player2>` - Head-to-head matchup analysis\n\n**Leaderboards & Rankings:**\n`!leaderboard [stat] [season]` - Show leaderboards (wins/points/kdr/kills/games/winrate/ppg/kpg)\n`!rankings [season]` - Power rankings with composite scoring\n\n**Match & Map Analysis:**\n`!match [player]` - Recent matches with detailed stats\n`!map [name]` - Comprehensive map statistics and analysis\n\n**Competition Data:**\n`!tournament [name]` - Tournament statistics and leaderboards\n`!season [name]` - Season analysis and standings\n\n**System Commands:**\n`!refresh` - Refresh data from spreadsheet\n`!help` - Show this help message\n    ';embed.description=commands_text;embed.add_field(name='💡 Pro Tips:',value='• Use `!leaderboard winrate` for win percentage rankings\n• Try `!player YourName` to see your detailed stats\n• Use `!map` without a name to see all available maps\n• Add season names to filter leaderboards by season',inline=False);embed.add_field(name='📊 Available Stats:',value='**wins** - Total wins | **points** - Total points | **kdr** - Kill/Death ratio\n**kills** - Total kills | **games** - Games played | **winrate** - Win percentage\n**ppg** - Points per game | **kpg** - Kills per game',inline=False);embed.add_field(name='🔍 Examples:',value='`!player Giant_Professor` - Get detailed player stats\n`!leaderboard points Season1` - Season 1 points leaderboard\n`!vs blu NYS_Lask` - Head-to-head comparison\n`!compare PlayerA PlayerB` - Full player comparison\n`!tournament WeeklyTourney` - Tournament analysis',inline=False);await ctx.send(embed=embed)
-@bot.command(name='stats')
-async def global_stats(ctx):
-	'Show overall league statistics'
-	if not game_data.matches:await ctx.send('No data available. Use `!refresh` to load data.');return
-	total_matches=len(game_data.matches);total_players=len(game_data.players);total_kills=sum(m['winner_kills']+m['loser_kills']for m in game_data.matches);total_points=sum(m['winner_points']+m['loser_points']for m in game_data.matches);player_games=Counter()
-	for match in game_data.matches:
-		if match['winner']!='[RESIGNED]':player_games[match['winner']]+=1
-		if match['loser']!='[RESIGNED]':player_games[match['loser']]+=1
-	map_popularity=Counter(m['map']for m in game_data.matches if m['map']);region_dist=Counter(m['region']for m in game_data.matches if m['region']);embed=discord.Embed(title='📊 BlockTanks League - Global Statistics',color=3329330);embed.add_field(name='🎮 Overall Activity',value=f"**{total_matches:,}** total matches\n**{total_players}** registered players\n**{total_kills:,}** total eliminations\n**{total_points:,.1f}** total points awarded",inline=True)
-	if player_games:most_active=player_games.most_common(1)[0];embed.add_field(name='👑 Most Active Player',value=f"**{most_active[0]}**\n{most_active[1]} games played",inline=True)
-	avg_kills_per_game=total_kills/total_matches if total_matches>0 else 0;avg_points_per_game=total_points/total_matches if total_matches>0 else 0;embed.add_field(name='📈 Averages',value=f"**{avg_kills_per_game:.1f}** kills per match\n**{avg_points_per_game:.1f}** points per match",inline=True)
-	if map_popularity:pop_map=map_popularity.most_common(1)[0];embed.add_field(name='🗺️ Most Popular Map',value=f"**{pop_map[0]}**\n{pop_map[1]} matches ({pop_map[1]/total_matches*100:.1f}%)",inline=True)
-	if region_dist:top_regions=region_dist.most_common(3);region_text='\n'.join([f"**{region}**: {count}"for(region,count)in top_regions]);embed.add_field(name='🌍 Top Regions',value=region_text,inline=True)
-	if game_data.last_updated:embed.add_field(name='🔄 Data Status',value=f"Last updated:\n{game_data.last_updated.strftime("%Y-%m-%d %H:%M:%S")}",inline=True)
-	await ctx.send(embed=embed)
-if __name__=='__main__':bot.run(os.getenv("DISCORD_TOKEN"))
+async def help_command(ctx):
+	pages=[];main_embed=discord.Embed(title='🤖 BTEL Bot Commands',color=5793266);main_embed.description='Navigate through pages to see all commands';pages.append(main_embed);commands_data=[('Player Commands',[('`!player <name>`','Detailed player statistics'),('`!compare <p1> <p2>`','Compare two players'),('`!vs <p1> <p2>`','Head-to-head matchup')]),('Leaderboards',[('`!hof [tier]`','Hall of Fame rankings'),('`!leaderboard [stat]`','Various stat leaderboards'),('`!lb wins/points/kdr/kills`','Specific leaderboards')]),('System',[('`!refresh`','Refresh data'),('`!help`','Show this help')])]
+	for(category,cmds)in commands_data:
+		embed=discord.Embed(title=f"📚 {category}",color=5793266)
+		for(cmd,desc)in cmds:embed.add_field(name=cmd,value=desc,inline=False)
+		pages.append(embed)
+	view=PaginatorView(ctx,pages);view.message=await ctx.send(embed=pages[0],view=view)
+if __name__=='__main__':bot.run(os.getenv('DISCORD_TOKEN'))
