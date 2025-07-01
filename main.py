@@ -206,6 +206,8 @@ async def head_to_head(ctx,player1,*,player2):
 	recent_form=recent_matches[-5:]
 	if recent_form:form_display=' → '.join([result.split()[0]for result in recent_form]);embed.add_field(name='📊 Recent Form (Last 5)',value=f"**{found_p1}**: {form_display}",inline=True)
 	await ctx.send(embed=embed)
+@bot.tree.command(name="ping", description="Check if the bot is alive")
+async def ping(interaction): await interaction.response.send_message("Pong!")
 @bot.command(name='tournament',aliases=['tourney'])
 async def tournament_stats(ctx,*,tournament_name=None):
 	'Show tournament statistics and leaderboards'
