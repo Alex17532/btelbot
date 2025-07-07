@@ -58,6 +58,7 @@ import json
 from collections import defaultdict as f
 import statistics
 A2=E.Intents.default()
+D.remove_command('help')
 A2.message_content=C
 D=r.Bot(command_prefix='!',intents=A2)
 A3={B:'https://docs.google.com/spreadsheets/d/19pi4JoomyimkKCFAzDVLYHjai16MiPBM-4y_NgucSKo/edit?gid=741413211#gid=741413211','player_stats':'https://docs.google.com/spreadsheets/d/19pi4JoomyimkKCFAzDVLYHjai16MiPBM-4y_NgucSKo/edit?gid=1821177716#gid=1821177716','head_to_head':'https://docs.google.com/spreadsheets/d/19pi4JoomyimkKCFAzDVLYHjai16MiPBM-4y_NgucSKo/edit?gid=1530295764#gid=1530295764',Q:'https://docs.google.com/spreadsheets/d/19pi4JoomyimkKCFAzDVLYHjai16MiPBM-4y_NgucSKo/edit?gid=2035449345#gid=2035449345'}
